@@ -903,6 +903,7 @@ class ReportAgent:
             r"\usepackage{fontspec}",
             r"\usepackage{graphicx,amsmath,amssymb,booktabs,float,parskip,hyperref}",
             r"\usepackage{listings,xcolor}",
+            r"\usepackage{url}",
             r"\lstset{basicstyle=\scriptsize\ttfamily,breaklines=true,"
             r"breakatwhitespace=false,columns=flexible,keepspaces=true,"
             r"frame=single,backgroundcolor=\color{gray!8}}",
@@ -1024,9 +1025,9 @@ class ReportAgent:
             r"\begin{itemize}",
         ]
         for p in output_paths:
-            lines.append(rf"  \item \texttt{{{_tex(str(p))}}}")
+            lines.append(rf"  \item \path{{{str(p)}}}")
         for p in gif_paths:
-            lines.append(rf"  \item \texttt{{{_tex(str(p))}}} (animated GIF)")
+            lines.append(rf"  \item \path{{{str(p)}}} (animated GIF)")
         lines += [r"\end{itemize}", r"\end{document}"]
 
         return "\n".join(lines)
