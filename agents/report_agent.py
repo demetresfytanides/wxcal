@@ -81,7 +81,19 @@ def _load_boundaries() -> dict:
             logger.warning(f"Could not download Cook County boundary: {exc}")
     if cook_cache.exists():
         try:
-            result["cook"] = gpd.read_file(cook_cache)
+            cook = gpd.read_file(cook_cache)
+            # TIGER/Line legal boundaries extend into Lake Michigan.
+            # Subtract the Great Lakes to get the land-only shoreline.
+            if "lakes" in result:
+                gl = result["lakes"]
+                if "name" in gl.columns:
+                    gl = gl[gl["name"].isin(_GREAT_LAKES)]
+                if not gl.empty:
+                    try:
+                        cook = cook.overlay(gl, how="difference")
+                    except Exception as exc:
+                        logger.warning(f"Could not clip Cook County to shoreline: {exc}")
+            result["cook"] = cook
         except Exception as exc:
             logger.warning(f"Could not read Cook County boundary: {exc}")
 
