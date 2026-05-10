@@ -1,0 +1,32 @@
+[project]
+name = "wxcal"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+description = "Weather Calibration Agent — bias-corrects NWP/AI model output against observations for AI training"
+dependencies = [
+    "lithosai-motus",
+    "anthropic",
+    "requests",
+    "xarray",
+    "numpy",
+    "scipy",
+    "pandas",
+    "netCDF4",
+    "zarr",
+    "tqdm",
+    "python-dotenv",
+    "cfgrib",
+    "eccodes",
+    "ecmwflibs>=0.7.0",
+    "matplotlib>=3.10.9",
+    "geopandas>=1.1.3",
+    "imageio>=2.37.3",
+    "pillow>=12.2.0",
+]
+
+# xesmf: install via conda-forge on macOS ARM
+#   conda install -c conda-forge xesmf esmf
+# wxcal falls back to scipy griddata if xesmf is unavailable.
+
+[tool.uv]
+package = false
