@@ -10,7 +10,7 @@
 
 ## Workflow
 
-![wxCal pipeline](assets/workflow.png)
+![wxCal pipeline](assets/workflow_v2.png)
 
 The pipeline runs six stages in sequence:
 
@@ -357,7 +357,7 @@ wxcal/
 │   └── geo.py               # Coordinate utilities
 └── assets/
     ├── logo.png
-    └── workflow.png
+    └── workflow_v2.png
 ```
 
 ---
