@@ -271,8 +271,8 @@ class CorrectionAgent:
             """
             Find the best IDW (p, radius_km) via leave-one-out cross-validation
             at station locations across all days in the period.
-            Tries 25 combinations in parallel (p ∈ {1.0,1.5,2.0,2.5,3.0},
-            radius ∈ {50,75,100,150,200} km). Call this before apply_correction
+            Tries 50 combinations in parallel (p ∈ {1.0,1.5,2.0,2.5,3.0},
+            radius ∈ {3,5,10,20,30,50,75,100,150,200} km). Call this before apply_correction
             so you use data-driven parameters instead of heuristic guesses.
             Returns best_p, best_radius_km, and full CV scores.
             """
@@ -334,7 +334,7 @@ class CorrectionAgent:
             stn_tree = cKDTree(xyz)
 
             p_values      = [1.0, 1.5, 2.0, 2.5, 3.0]
-            radius_values = [50, 75, 100, 150, 200]
+            radius_values = [3, 5, 10, 20, 30, 50, 75, 100, 150, 200]
             k_query       = min(n, 51)  # +1 so we can drop the self-match
 
             # Pre-query once for the largest radius to reuse distances
