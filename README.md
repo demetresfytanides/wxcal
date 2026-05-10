@@ -271,7 +271,8 @@ Agent:
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Required for local runs — direct Anthropic API |
+| `ANTHROPIC_API_KEY` | Local runs with Claude (default) |
+| `OPENAI_API_KEY` | Local runs with any OpenAI-compatible model — must also pass `--llm <model>`, e.g. `--llm gpt-4o` |
 
 On Motus Cloud, LLM credentials are injected automatically — no `.env` needed.
 
