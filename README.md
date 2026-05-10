@@ -4,7 +4,7 @@
 
 **wxCal** is an agentic pipeline that bias-corrects numerical weather prediction (NWP) and AI-based model output against surface observations, then produces a transparent, publication-ready PDF report documenting every decision made.
 
-> **Motus use case** — wxCal is built entirely on [LithosAI Motus](https://motus.lithosai.com), demonstrating how Motus `ReActAgent` loops can replace hand-coded correction logic with autonomous agents that reason, act, validate, and self-correct.
+> **Motus use case** — wxCal is built entirely on [LithosAI Motus](https://motus.lithosai.com), demonstrating how Motus `ReActAgent` loops and multi-agent composition (`as_tool()`) can replace hand-coded correction logic with autonomous agents that reason, act, validate, and self-correct.
 
 ---
 
@@ -27,7 +27,7 @@ The pipeline runs six stages in sequence:
 
 ## The Motus Agent Layer
 
-wxCal replaces traditional hard-coded correction scripts with three autonomous agents, each built on a **Motus `ReActAgent`** loop:
+wxCal replaces traditional hard-coded correction scripts with autonomous agents built on **Motus `ReActAgent`** loops:
 
 ```
 Reason → Call tool → Observe result → Decide next step → repeat
@@ -39,13 +39,35 @@ Each agent receives statistical summaries (never raw arrays), calls Python funct
 
 Inspects model grid statistics and observation distributions. Decides whether to clip negatives, flag extremes, zero sub-instrument trace values, or drop sparse stations — with explicit written reasoning for every choice. If the data is already clean, it records that too.
 
-### Bias Correction Agent
+### Bias Correction — Supervisor + Specialist Design
 
-1. **Characterises the obs-model signal** — computes the spatial coefficient of variation (CV) and obs–model spatial correlation per day to classify the signal as *spatially coherent* or *spatially variable*. These labels describe the statistical relationship between model output and observations, not the meteorological storm type.
-2. **Tunes IDW parameters via leave-one-out cross-validation** — before applying IDW, searches a 5×5 grid of (p, radius) combinations in parallel and returns the combination with the lowest LOO cross-validated RMSE at station locations. This decouples parameter selection from method selection: a degraded result after tuned parameters is a genuine method signal, not a parameter problem.
-3. **Selects a method** — IDW for spatially coherent signals (gradually-varying ratio field), Quantile Mapping for spatially variable signals (distribution correction robust to phase errors and localised extremes).
-4. **Applies, validates, and retries** — if RMSE degrades > 5% after tuned parameters, switches to the alternative method; rejects all corrections if neither improves the baseline.
-5. **Reports honestly** — if correction is harmful, returns uncorrected data and explains why.
+The bias correction stage uses a **multi-agent architecture** built with Motus `as_tool()`: a supervisor agent orchestrates strategy while two specialist agents own their respective correction methods.
+
+```
+Supervisor
+├── idw_correction  ←  IDW Specialist  (tune_idw_parameters → apply_correction)
+└── qm_correction   ←  QM Specialist   (apply_qm_correction)
+```
+
+Each specialist is registered with the supervisor as an opaque tool via `agent.as_tool()`. The supervisor sees only the specialists' names, descriptions, and JSON metric outputs — it has no knowledge of how each method works internally. This means each agent has a smaller, focused tool set and a shorter system prompt, reducing token overhead per LLM call.
+
+**Supervisor** orchestrates the correction:
+1. Calls `diagnose_regime` to classify the signal as *spatially coherent* or *spatially variable*.
+2. Calls `get_station_density` and `get_bias_overview` for domain context.
+3. Delegates to the appropriate specialist first (IDW for coherent signals, QM for variable signals).
+4. If the first method degrades RMSE > 5%, delegates to the other specialist as a fallback.
+5. Calls `finish_correction` to accept the best result or reject all corrections.
+
+**IDW Specialist** owns the IDW pipeline:
+1. Calls `tune_idw_parameters` — searches 50 (p, radius) combinations via leave-one-out cross-validation and returns the best pair.
+2. Calls `apply_correction` with the CV-selected parameters.
+3. Returns validation metrics JSON to the supervisor.
+
+**QM Specialist** owns quantile mapping:
+1. Calls `apply_qm_correction` — fits a distribution transfer function and applies it grid-wide.
+2. Returns validation metrics JSON to the supervisor.
+
+All tools close over the same `CorrectionAgent` Python instance, so corrected datasets, the correction log, and the attempt counter are shared correctly across specialist delegations.
 
 ### Report Agent
 
@@ -339,7 +361,7 @@ The bias correction is applied exclusively to the hours within each window — n
 
 | Component | Role |
 |---|---|
-| [LithosAI Motus](https://motus.lithosai.com) | Agent orchestration (`ReActAgent`, `@tool`, cloud deploy) |
+| [LithosAI Motus](https://motus.lithosai.com) | Agent orchestration (`ReActAgent`, `@tool`, `as_tool()` multi-agent composition, cloud deploy) |
 | [Anthropic Claude](https://anthropic.com) | LLM backbone for all three agents |
 | [xarray](https://xarray.pydata.org) | Gridded model data (NetCDF / Zarr) |
 | [scipy](https://scipy.org) | `cKDTree` nearest-neighbour, LOO-CV, quantile functions |
@@ -359,7 +381,7 @@ wxcal/
 ├── config.py                # WxCalConfig dataclass
 ├── agents/
 │   ├── qaqc_agent.py        # QA/QC ReActAgent
-│   ├── correction_agent.py  # Bias correction ReActAgent (signal diagnosis, LOO-CV tuning, IDW + QM)
+│   ├── correction_agent.py  # Supervisor + IDW/QM specialist agents (multi-agent via as_tool())
 │   └── report_agent.py      # Report ReActAgent + LaTeX builder
 ├── tools/
 │   ├── ingest.py            # HRRR / ERA5 / local file loader
