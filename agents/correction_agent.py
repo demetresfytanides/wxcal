@@ -378,13 +378,15 @@ class CorrectionAgent:
             _log(f"  Best: p={best['p']}, radius={best['radius_km']} km,"
                  f" LOO-RMSE={best['loo_rmse']:.4f}  (n={n} station-day pairs)")
 
-            return json.dumps({
+            result = {
                 "best_p":         best["p"],
                 "best_radius_km": best["radius_km"],
                 "best_loo_rmse":  best["loo_rmse"],
                 "n_station_days": n,
                 "top_5":          results[:5],
-            }, indent=2)
+            }
+            self.correction_log.append({"action": "tune_idw", **result})
+            return json.dumps(result, indent=2)
 
         tools = [narrate, get_station_density, get_bias_overview,
                  diagnose_regime, tune_idw_parameters,

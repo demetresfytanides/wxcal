@@ -139,7 +139,9 @@ Your job:
 1. Write clear, honest narrative for each section.
 2. Cite SPECIFIC NUMBERS (bias, RMSE, MAE, KGE, POD, FAR, frequency bias, p95 ratio,
    station counts, thresholds). Never write "the bias was large" -- write "bias = +3.2 mm/day".
-3. For every parameter choice, explain WHY that value was chosen over alternatives.
+3. For IDW corrections, describe the LOO cross-validation parameter search: report
+   the best (p, radius_km) selected, the LOO-RMSE achieved, and how many station-day
+   pairs were used. These values are in the correction log under "action": "tune_idw".
 4. Include ALL correction attempts -- parameters tried, metrics, accept/reject reason.
 5. If no QA/QC changes were made, explain why the data was already clean.
 6. If the correction was ultimately rejected, explain that too.
@@ -341,11 +343,12 @@ def _methods_latex(obs_utc_cutoff: int = 0) -> str:
     return r"""
 \subsection*{Correction Methods}
 
-The pipeline selects a correction method based on the diagnosed precipitation
-regime. For stratiform events (spatially coherent bias), Inverse Distance
-Weighting (IDW) is applied. For convective events (high spatial variability,
-low obs--model spatial correlation), Quantile Mapping (QM) is preferred because
-it corrects the distribution shape without requiring spatial coherence.
+The pipeline selects a correction method based on the characterised obs--model
+signal. For spatially coherent signals (low-to-moderate CV, adequate spatial
+correlation), Inverse Distance Weighting (IDW) is applied with parameters tuned
+via leave-one-out cross-validation. For spatially variable signals (high CV
+or low spatial correlation), Quantile Mapping (QM) is preferred because it
+corrects the distribution shape without requiring spatial coherence.
 
 \subsubsection*{IDW Correction}
 
@@ -375,6 +378,30 @@ ending at approximately 12:00\,UTC (7\,am local time for Central Daylight Time),
 introducing a $\sim$12-hour phase offset relative to the calendar-day sum.
 Set \texttt{obs\_utc\_cutoff = 12} in the configuration to use the rigorous window."""
 ) + r"""
+
+\subsubsection*{IDW parameter tuning via leave-one-out cross-validation}
+
+Before applying IDW, the pipeline searches a 5$\times$10 grid of power values
+($p \in \{1.0, 1.5, 2.0, 2.5, 3.0\}$) and search radii
+($r \in \{3, 5, 10, 20, 30, 50, 75, 100, 150, 200\}$\,km) using
+leave-one-out (LOO) cross-validation at station locations. For each candidate
+$(p, r)$, every station $i$ is temporarily withheld; the bias ratio at
+station $i$ is predicted from the remaining stations using IDW, and the
+prediction error is recorded. The LOO root-mean-square error across all
+stations is:
+
+\begin{equation}
+  \mathrm{LOO\text{-}RMSE}(p, r) =
+    \sqrt{\frac{1}{N_s}\sum_{i=1}^{N_s}
+      \bigl(\hat{r}_i^{(-i)} - r_i\bigr)^2}
+\end{equation}
+
+where $\hat{r}_i^{(-i)}$ is the IDW prediction at station $i$ using all
+other stations and $r_i = O_i / M_i^{\mathrm{stn}}$ is the observed ratio.
+All 50 combinations are evaluated in parallel; the $(p, r)$ pair that
+minimises LOO-RMSE is used for the final correction. A high LOO-RMSE across
+all combinations indicates that the ratio field is dominated by noise rather
+than signal -- in that case QM is tried instead.
 
 \subsubsection*{IDW weight and ratio field}
 
@@ -946,7 +973,28 @@ class ReportAgent:
         ]
 
         for entry in correction_log:
-            if entry.get("action") == "finish":
+            if entry.get("action") == "tune_idw":
+                top5 = entry.get("top_5", [])
+                lines += [
+                    r"\paragraph{IDW Parameter Tuning (LOO Cross-Validation)}",
+                    r"\begin{tabular}{@{}lrr@{}}\toprule",
+                    r"Parameter set & LOO-RMSE \\\midrule",
+                ]
+                for row in top5:
+                    marker = r" $\leftarrow$ \textbf{selected}" if row == top5[0] else ""
+                    lines.append(
+                        rf"$p = {row['p']}$, radius $= {row['radius_km']}$\,km"
+                        rf" & {row['loo_rmse']:.4f}{marker} \\"
+                    )
+                lines += [
+                    r"\bottomrule\end{tabular}",
+                    rf"\medskip Best: $p = {entry['best_p']}$,"
+                    rf" radius $= {entry['best_radius_km']}$\,km,"
+                    rf" LOO-RMSE $= {entry['best_loo_rmse']:.4f}$"
+                    rf" ({entry['n_station_days']} station-day pairs).",
+                    "",
+                ]
+            elif entry.get("action") == "finish":
                 accepted = "Accepted" if entry.get("accepted") else "Rejected"
                 reasoning = _clean(entry.get("reasoning", ""))
                 lines += [
