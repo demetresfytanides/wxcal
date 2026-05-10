@@ -101,10 +101,10 @@ def _build_ratio_field(
 def _window_mask(times: pd.DatetimeIndex, day, obs_utc_cutoff: int) -> np.ndarray:
     """Boolean mask for the hours belonging to this observation date's accumulation window."""
     if obs_utc_cutoff == 0:
-        return (times.date == day)
+        return np.array(times.date == day)
     t_end   = pd.Timestamp(day) + pd.Timedelta(hours=obs_utc_cutoff)
     t_start = t_end - pd.Timedelta(hours=24)
-    return ((times >= t_start) & (times < t_end)).values
+    return np.array((times >= t_start) & (times < t_end))
 
 
 def apply_correction(
