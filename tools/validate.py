@@ -72,10 +72,44 @@ def compute_metrics(ds_before: xr.Dataset, ds_after: xr.Dataset,
         if mask.sum() < 2:
             return {}
         o, m = obs[mask], model[mask]
+
         bias = float(np.mean(m - o))
+        mae  = float(np.mean(np.abs(m - o)))
         rmse = float(np.sqrt(np.mean((m - o) ** 2)))
         corr = float(np.corrcoef(o, m)[0, 1]) if o.std() > 0 and m.std() > 0 else float("nan")
-        return {"bias": bias, "rmse": rmse, "corr": corr, "n": int(mask.sum())}
+
+        # Kling-Gupta Efficiency: combines correlation, variability ratio, bias ratio
+        if o.std() > 0 and m.std() > 0 and o.mean() > 0:
+            r     = np.corrcoef(o, m)[0, 1]
+            alpha = float(m.std()  / o.std())
+            beta  = float(m.mean() / o.mean())
+            kge   = float(1 - np.sqrt((r - 1)**2 + (alpha - 1)**2 + (beta - 1)**2))
+        else:
+            kge = float("nan")
+
+        # Categorical wet/dry metrics (threshold 0.1 mm)
+        thresh  = 0.1
+        obs_wet = o > thresh
+        mdl_wet = m > thresh
+        hits    = int(np.sum( obs_wet &  mdl_wet))
+        misses  = int(np.sum( obs_wet & ~mdl_wet))
+        fa      = int(np.sum(~obs_wet &  mdl_wet))
+        pod        = float(hits / (hits + misses)) if (hits + misses) > 0 else float("nan")
+        far        = float(fa   / (hits + fa))     if (hits + fa)     > 0 else float("nan")
+        freq_bias  = float((hits + fa) / (hits + misses)) if (hits + misses) > 0 else float("nan")
+
+        # Upper-tail ratio
+        o95 = float(np.percentile(o, 95))
+        m95 = float(np.percentile(m, 95))
+        p95_ratio = float(m95 / o95) if o95 > 0 else float("nan")
+
+        return {
+            "bias": bias, "mae": mae, "rmse": rmse, "corr": corr,
+            "kge": kge,
+            "pod": pod, "far": far, "freq_bias": freq_bias,
+            "p95_ratio": p95_ratio,
+            "n": int(mask.sum()),
+        }
 
     s_pre  = _stats(pre)
     s_post = _stats(post)

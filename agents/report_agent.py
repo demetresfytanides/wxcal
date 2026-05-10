@@ -31,6 +31,83 @@ from utils.geo import latlon_to_xyz
 mpl.use("Agg")
 logger = logging.getLogger(__name__)
 
+# ── Geographic boundary cache ──────────────────────────────────────────────────
+
+_GEO_CACHE = Path.home() / ".cache" / "wxcal" / "boundaries"
+
+_NE_URLS = {
+    "states": ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector"
+               "/master/geojson/ne_50m_admin_1_states_provinces.geojson"),
+    "lakes":  ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector"
+               "/master/geojson/ne_50m_lakes.geojson"),
+}
+_GREAT_LAKES = {"Lake Superior", "Lake Michigan", "Lake Huron", "Lake Erie", "Lake Ontario"}
+_COOK_URL = (
+    "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_Current"
+    "/MapServer/84/query?where=GEOID+%3D+%2717031%27&outFields=*&outSR=4326&f=geojson"
+)
+
+
+def _load_boundaries() -> dict:
+    """Download and cache state outlines, Great Lakes, and Cook County boundaries."""
+    import geopandas as gpd
+    import requests
+
+    _GEO_CACHE.mkdir(parents=True, exist_ok=True)
+    result: dict = {}
+
+    for name, url in _NE_URLS.items():
+        cache = _GEO_CACHE / f"{name}.geojson"
+        if not cache.exists():
+            try:
+                r = requests.get(url, timeout=30)
+                r.raise_for_status()
+                cache.write_bytes(r.content)
+            except Exception as exc:
+                logger.warning(f"Could not download {name} boundaries: {exc}")
+                continue
+        try:
+            result[name] = gpd.read_file(cache)
+        except Exception as exc:
+            logger.warning(f"Could not read {name} boundaries: {exc}")
+
+    cook_cache = _GEO_CACHE / "cook_county.geojson"
+    if not cook_cache.exists():
+        try:
+            r = requests.get(_COOK_URL, timeout=30)
+            r.raise_for_status()
+            cook_cache.write_bytes(r.content)
+        except Exception as exc:
+            logger.warning(f"Could not download Cook County boundary: {exc}")
+    if cook_cache.exists():
+        try:
+            result["cook"] = gpd.read_file(cook_cache)
+        except Exception as exc:
+            logger.warning(f"Could not read Cook County boundary: {exc}")
+
+    return result
+
+
+def _draw_boundaries(ax, boundaries: dict,
+                     lon_min: float, lon_max: float,
+                     lat_min: float, lat_max: float) -> None:
+    """Overlay state lines, Great Lakes, and Cook County on a map axis."""
+    buf = 1.0
+    if "states" in boundaries:
+        clipped = boundaries["states"].cx[lon_min - buf:lon_max + buf,
+                                          lat_min - buf:lat_max + buf]
+        clipped.boundary.plot(ax=ax, color="#555555", linewidth=0.5, zorder=6)
+    if "lakes" in boundaries:
+        gl = boundaries["lakes"]
+        if "name" in gl.columns:
+            gl = gl[gl["name"].isin(_GREAT_LAKES)]
+        gl = gl.cx[lon_min - buf:lon_max + buf, lat_min - buf:lat_max + buf]
+        if not gl.empty:
+            gl.boundary.plot(ax=ax, color="#2166ac", linewidth=0.9, zorder=7)
+    if "cook" in boundaries and not boundaries["cook"].empty:
+        boundaries["cook"].boundary.plot(ax=ax, color="black", linewidth=1.4, zorder=8)
+
+
 PRECIP_LEVELS = [0, 0.1, 0.5, 1, 2, 5, 10, 20, 30, 50, 75, 100]
 PRECIP_CMAP   = plt.get_cmap("YlGnBu", len(PRECIP_LEVELS) - 1)
 PRECIP_NORM   = BoundaryNorm(PRECIP_LEVELS, PRECIP_CMAP.N)
@@ -44,15 +121,20 @@ You are a scientific report writer specialising in meteorological data products.
 You will receive:
 - A structured log of every QA/QC decision made
 - A structured log of every bias correction decision made, with metrics
+- An inventory of every figure included in the report
 
 Your job:
 1. Write clear, honest narrative for each section.
-2. Cite SPECIFIC NUMBERS (bias, RMSE, correlation, station counts, thresholds).
-   Never write "the bias was large" -- write "bias = +3.2 mm/day".
+2. Cite SPECIFIC NUMBERS (bias, RMSE, MAE, KGE, POD, FAR, frequency bias, p95 ratio,
+   station counts, thresholds). Never write "the bias was large" -- write "bias = +3.2 mm/day".
 3. For every parameter choice, explain WHY that value was chosen over alternatives.
 4. Include ALL correction attempts -- parameters tried, metrics, accept/reject reason.
 5. If no QA/QC changes were made, explain why the data was already clean.
 6. If the correction was ultimately rejected, explain that too.
+7. REFERENCE EVERY FIGURE explicitly by name in the narrative. Every scatter plot and every
+   spatial comparison map must be mentioned by its day in the correction_narrative section
+   (e.g. "the spatial comparison map for 2024-06-01 shows..."). Direct the reader to the
+   animated GIFs in the conclusions section.
 
 FORMATTING RULES -- MANDATORY. Violations break the PDF compilation:
 - Write PLAIN PROSE ONLY. No markdown whatsoever.
@@ -393,9 +475,13 @@ def _make_comparison_figures(ds_before: xr.Dataset, ds_after: xr.Dataset,
                               obs_utc_cutoff: int = 0) -> list[Path]:
     grid_lat = ds_before["lat"].values
     grid_lon = ds_before["lon"].values
+    lon_min, lon_max = float(grid_lon.min()), float(grid_lon.max())
+    lat_min, lat_max = float(grid_lat.min()), float(grid_lat.max())
     df_obs   = df_obs.copy()
     df_obs["date"] = pd.to_datetime(df_obs["date"]).dt.date
     paths = []
+
+    boundaries = _load_boundaries()
 
     days = sorted({pd.Timestamp(t).date() for t in ds_before.time.values})
     for day in days:
@@ -415,9 +501,10 @@ def _make_comparison_figures(ds_before: xr.Dataset, ds_after: xr.Dataset,
             if ax is axes[0] and not obs_day.empty:
                 ax.scatter(obs_day["lon"], obs_day["lat"], s=4, c="red",
                            alpha=0.6, zorder=5)
+            _draw_boundaries(ax, boundaries, lon_min, lon_max, lat_min, lat_max)
             plt.colorbar(pcm, ax=ax, label="mm/day", pad=0.02, shrink=0.85)
-            ax.set_xlim(float(grid_lon.min()), float(grid_lon.max()))
-            ax.set_ylim(float(grid_lat.min()), float(grid_lat.max()))
+            ax.set_xlim(lon_min, lon_max)
+            ax.set_ylim(lat_min, lat_max)
             ax.set_title(f"{title}\n{day}", fontsize=10)
             ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
         fig.suptitle(f"wxCal Bias Correction -- {variable} -- {day}", fontsize=12)
@@ -515,8 +602,11 @@ def _make_animated_gifs(ds_before: xr.Dataset, ds_after: xr.Dataset,
 
     grid_lat = ds_before["lat"].values
     grid_lon = ds_before["lon"].values
+    lon_min, lon_max = float(grid_lon.min()), float(grid_lon.max())
+    lat_min, lat_max = float(grid_lat.min()), float(grid_lat.max())
     days = sorted({pd.Timestamp(t).date() for t in ds_before.time.values})
 
+    boundaries = _load_boundaries()
     frames_before, frames_after, frames_compare = [], [], []
 
     for day in days:
@@ -528,6 +618,8 @@ def _make_animated_gifs(ds_before: xr.Dataset, ds_after: xr.Dataset,
             fig, ax = plt.subplots(figsize=(7, 5))
             pcm = ax.pcolormesh(grid_lon, grid_lat, data, cmap=cmap, norm=norm, shading="auto")
             plt.colorbar(pcm, ax=ax, label="mm/day", shrink=0.85)
+            _draw_boundaries(ax, boundaries, lon_min, lon_max, lat_min, lat_max)
+            ax.set_xlim(lon_min, lon_max); ax.set_ylim(lat_min, lat_max)
             ax.set_title(f"{title} — {day}", fontsize=10)
             ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
             fig.tight_layout()
@@ -547,6 +639,8 @@ def _make_animated_gifs(ds_before: xr.Dataset, ds_after: xr.Dataset,
                 pcm = ax.pcolormesh(grid_lon, grid_lat, data,
                                     cmap=cmap, norm=norm, shading="auto")
                 plt.colorbar(pcm, ax=ax, label="mm/day", shrink=0.85)
+                _draw_boundaries(ax, boundaries, lon_min, lon_max, lat_min, lat_max)
+                ax.set_xlim(lon_min, lon_max); ax.set_ylim(lat_min, lat_max)
                 ax.set_title(f"{title} — {day}", fontsize=9)
                 ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
             fig.tight_layout()
@@ -654,6 +748,20 @@ class ReportAgent:
         logger.info(f"  {len(fig_paths)} map(s), {len(scatter_paths)} scatter plot(s), "
                     f"{len(gif_paths)} GIF(s) saved to {fig_dir}")
 
+        # Build figure inventory so the LLM can reference specific figures by name
+        scatter_desc = (
+            ", ".join(p.stem for p in scatter_paths)
+            if scatter_paths else "none generated"
+        )
+        map_desc = (
+            ", ".join(p.stem for p in fig_paths)
+            if fig_paths else "none generated"
+        )
+        gif_desc = (
+            ", ".join(p.name for p in gif_paths)
+            if gif_paths else "none generated"
+        )
+
         prompt = (
             f"Write the wxCal report for this run.\n\n"
             f"Variable: {variable}\n"
@@ -664,6 +772,16 @@ class ReportAgent:
             f"Bias correction log:\n"
             f"{json.dumps(correction_log, indent=2, default=str)}\n\n"
             f"Output files: {[str(p) for p in output_paths]}\n\n"
+            f"FIGURES INCLUDED IN THIS REPORT -- reference them explicitly in your narrative:\n"
+            f"  Scatter plots (observed vs model at station locations, before and after "
+            f"correction, one panel per day): {scatter_desc}\n"
+            f"  Spatial comparison maps (before / after / difference side-by-side, "
+            f"one figure per day): {map_desc}\n"
+            f"  Animated GIFs (cycling through all days): {gif_desc}\n\n"
+            f"In the correction_narrative section, refer to the scatter plots and spatial maps "
+            f"by their day (e.g. 'the spatial comparison map for 2024-06-01 shows...'). "
+            f"In the conclusions section, direct the reader to the animated GIFs for a "
+            f"day-by-day overview.\n\n"
             f"Write all four sections then call finish_report.\n"
             f"IMPORTANT: plain prose only. No markdown. No Unicode."
         )
@@ -693,14 +811,18 @@ class ReportAgent:
         def sec(name: str, default: str = "") -> str:
             return self.sections.get(name, default)
 
+        _fig_counter = [0]
+
         def fig_block(path: Path, caption: str = "",
                       width: str = r"\textwidth") -> str:
-            return (r"\begin{figure}[htbp]" "\n"
+            _fig_counter[0] += 1
+            label = f"fig:{path.stem}"
+            return (r"\begin{figure}[H]" "\n"
                     r"  \centering" "\n"
                     rf"  \includegraphics[width={width}]{{{str(path)}}}" "\n"
                     rf"  \caption{{{_tex(caption)}}}" "\n"
-                    r"\end{figure}" "\n"
-                    r"\clearpage" "\n")
+                    rf"  \label{{{label}}}" "\n"
+                    r"\end{figure}" "\n")
 
         lines = [
             r"\documentclass[11pt,letterpaper]{article}",
@@ -774,25 +896,31 @@ class ReportAgent:
                     rf"\paragraph{{Attempt {entry['attempt']}: {param_str}}}",
                     r"\begin{tabular}{@{}lrr@{}}\toprule",
                     r"Metric & Pre-correction & Post-correction \\\midrule",
-                    rf"Bias (mm/day) & {_f(pre,'bias')} & {_f(post,'bias')} \\",
-                    rf"RMSE (mm/day) & {_f(pre,'rmse')} & {_f(post,'rmse')} \\",
-                    rf"Correlation   & {_f(pre,'corr')} & {_f(post,'corr')} \\",
-                    rf"RMSE change   & \multicolumn{{2}}{{r}}"
+                    rf"Bias (mm/day)      & {_f(pre,'bias')}      & {_f(post,'bias')} \\",
+                    rf"MAE (mm/day)       & {_f(pre,'mae')}       & {_f(post,'mae')} \\",
+                    rf"RMSE (mm/day)      & {_f(pre,'rmse')}      & {_f(post,'rmse')} \\",
+                    rf"Correlation        & {_f(pre,'corr')}      & {_f(post,'corr')} \\",
+                    rf"KGE                & {_f(pre,'kge')}       & {_f(post,'kge')} \\",
+                    rf"Frequency bias     & {_f(pre,'freq_bias')} & {_f(post,'freq_bias')} \\",
+                    rf"POD                & {_f(pre,'pod')}       & {_f(post,'pod')} \\",
+                    rf"FAR                & {_f(pre,'far')}       & {_f(post,'far')} \\",
+                    rf"p95 ratio (m/o)    & {_f(pre,'p95_ratio')} & {_f(post,'p95_ratio')} \\",
+                    rf"RMSE change        & \multicolumn{{2}}{{r}}"
                     rf"{{{imp.get('rmse_improvement_pct', float('nan')):.1f}\%}} \\",
                     r"\bottomrule\end{tabular}",
                     "",
                 ]
 
-        lines += [r"\subsection*{Station vs.\ Model Scatter}", r"\clearpage"]
+        lines += [r"\subsection*{Station vs.\ Model Scatter}"]
         for p in scatter_paths:
             lines.append(fig_block(
                 p,
-                f"Observed vs. model {variable} at station locations (all days combined). "
-                f"Left: before correction. Right: after correction. "
+                f"Observed vs. model {variable} at station locations. "
+                f"Left panel: before correction. Right panel: after correction. "
                 f"Bias, RMSE, and Pearson r annotated in each panel.",
             ))
 
-        lines += [r"\subsection*{Before / After Spatial Maps}", r"\clearpage"]
+        lines += [r"\subsection*{Before / After Spatial Maps}"]
         for p in fig_paths:
             day_str = p.stem.replace("compare_", "")
             lines.append(fig_block(
@@ -813,7 +941,7 @@ class ReportAgent:
             lines += [r"\begin{itemize}"]
             for p in gif_paths:
                 lines.append(rf"  \item \texttt{{{_tex(p.name)}}} --- {_tex(p.stem.replace('_', ' '))}")
-            lines += [r"\end{itemize}", r"\clearpage"]
+            lines += [r"\end{itemize}"]
 
         lines += [
             r"\section{Conclusions}",
