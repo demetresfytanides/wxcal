@@ -20,7 +20,7 @@ The pipeline runs six stages in sequence:
 | **Regrid** | Reprojects onto the target grid — either a WRF `geo_em` domain or a lat/lon bounding box |
 | **Observations** | Fetches daily station data from the NOAA ACIS multi-network API or a local CSV |
 | **QA/QC Agent** | LLM inspects data statistics, decides thresholds, flags/clips/drops, logs every decision |
-| **Correction Agent** | LLM diagnoses precipitation regime, selects and applies IDW or Quantile Mapping, validates, retries or rejects |
+| **Correction Agent** | LLM diagnoses the obs-model signal, tunes IDW parameters via cross-validation, selects and applies IDW or Quantile Mapping, validates, retries or rejects |
 | **Report Agent** | LLM writes a full narrative; Python generates comparison maps and scatter plots; XeLaTeX compiles a PDF |
 
 ---
@@ -41,14 +41,15 @@ Inspects model grid statistics and observation distributions. Decides whether to
 
 ### Bias Correction Agent
 
-1. **Diagnoses the precipitation regime** — computes spatial coefficient of variation (CV) and obs–model spatial correlation per day to classify as *convective* or *stratiform*
-2. **Selects a method** — IDW for stratiform (spatially coherent bias), Quantile Mapping for convective (distribution correction robust to phase errors)
-3. **Applies, validates, and retries** — if RMSE degrades > 5%, switches to the alternative method; rejects all corrections if neither improves the baseline
-4. **Reports honestly** — if correction is harmful, returns uncorrected data and explains why
+1. **Characterises the obs-model signal** — computes the spatial coefficient of variation (CV) and obs–model spatial correlation per day to classify the signal as *spatially coherent* or *spatially variable*. These labels describe the statistical relationship between model output and observations, not the meteorological storm type.
+2. **Tunes IDW parameters via leave-one-out cross-validation** — before applying IDW, searches a 5×5 grid of (p, radius) combinations in parallel and returns the combination with the lowest LOO cross-validated RMSE at station locations. This decouples parameter selection from method selection: a degraded result after tuned parameters is a genuine method signal, not a parameter problem.
+3. **Selects a method** — IDW for spatially coherent signals (gradually-varying ratio field), Quantile Mapping for spatially variable signals (distribution correction robust to phase errors and localised extremes).
+4. **Applies, validates, and retries** — if RMSE degrades > 5% after tuned parameters, switches to the alternative method; rejects all corrections if neither improves the baseline.
+5. **Reports honestly** — if correction is harmful, returns uncorrected data and explains why.
 
 ### Report Agent
 
-Receives all decision logs, writes four narrative sections (executive summary, QA/QC narrative, correction narrative, conclusions) with specific numbers cited throughout. Python generates spatial comparison maps (before / after / difference) and obs-vs-model scatter plots. XeLaTeX compiles the final PDF.
+Receives all decision logs, writes four narrative sections (executive summary, QA/QC narrative, correction narrative, conclusions) with specific numbers and figure references throughout. Python generates spatial comparison maps (before / after / difference) with Great Lakes and county boundaries overlaid, animated GIFs, and obs-vs-model scatter plots. XeLaTeX compiles the final PDF.
 
 ---
 
@@ -88,7 +89,7 @@ uv sync
 | [`anthropic`](https://pypi.org/project/anthropic/) | Anthropic SDK used by Motus `AnthropicChatClient` |
 | [`xarray`](https://xarray.pydata.org) | Gridded NetCDF / Zarr model data |
 | [`numpy`](https://numpy.org) | Array operations throughout the pipeline |
-| [`scipy`](https://scipy.org) | `cKDTree` nearest-neighbour lookup, quantile functions |
+| [`scipy`](https://scipy.org) | `cKDTree` nearest-neighbour lookup, LOO-CV, quantile functions |
 | [`pandas`](https://pandas.pydata.org) | Observation DataFrames |
 | [`netCDF4`](https://unidata.github.io/netcdf4-python/) | NetCDF read/write backend |
 | [`zarr`](https://zarr.readthedocs.io) | Optional Zarr output format |
@@ -96,7 +97,7 @@ uv sync
 | [`eccodes`](https://pypi.org/project/eccodes/) | ECMWF GRIB codec (cfgrib backend) |
 | [`ecmwflibs`](https://pypi.org/project/ecmwflibs/) | Pre-built ECMWF native libraries |
 | [`matplotlib`](https://matplotlib.org) | Spatial maps and scatter plots |
-| [`geopandas`](https://geopandas.org) | Geospatial utilities |
+| [`geopandas`](https://geopandas.org) | Geographic boundary overlays (Great Lakes, counties) |
 | [`imageio`](https://imageio.readthedocs.io) | Animated GIF generation |
 | [`pillow`](https://python-pillow.org) | Image processing |
 | [`requests`](https://requests.readthedocs.io) | NOAA ACIS API calls |
@@ -126,7 +127,19 @@ wxCal requires an LLM API key for the three agents. Choose one backend:
    ANTHROPIC_API_KEY=sk-ant-...
    ```
 
-**Option B — LithosAI Motus Cloud (production / sharing)**
+**Option B — OpenAI-compatible API (local runs)**
+
+1. Add your key to `.env`:
+   ```
+   OPENAI_API_KEY=sk-...
+   ```
+2. Pass `--llm` with an OpenAI model name when running:
+   ```bash
+   python orchestrator.py ... --llm gpt-4o
+   ```
+   If `OPENAI_API_KEY` is set but you pass a Claude model name, wxCal will print a clear error and exit rather than returning a cryptic 404.
+
+**Option C — LithosAI Motus Cloud (production / sharing)**
 
 1. Install the Motus CLI: `uv tool install lithosai-motus`
 2. Log in: `motus login`
@@ -164,7 +177,8 @@ On Motus Cloud the platform injects LLM credentials automatically via `OPENAI_BA
 
 ```
 Local:  ANTHROPIC_API_KEY set  →  AnthropicChatClient  →  Anthropic direct
-Cloud:  OPENAI_BASE_URL   set  →  OpenAIChatClient     →  Motus Cloud proxy
+Local:  OPENAI_API_KEY set     →  OpenAIChatClient     →  OpenAI direct
+Cloud:  OPENAI_BASE_URL set    →  OpenAIChatClient     →  Motus Cloud proxy
 ```
 
 ### Deploy steps
@@ -186,7 +200,7 @@ After deploying, Motus prints the agent endpoint URL. Use it to send requests:
 ```bash
 # Single message
 motus serve chat <AGENT_ENDPOINT_URL> \
-  "Run wxCal for 2024-06-01 to 2024-06-03, bbox 41.0 43.5 -89.0 -86.0, precipitation"
+  "Run wxCal for 2024-06-01 to 2024-06-03, geo /path/to/geo_em.d01.nc, precipitation"
 
 # Interactive REPL
 motus serve chat <AGENT_ENDPOINT_URL>
@@ -208,24 +222,14 @@ uv sync
 cp .env.example .env
 # Edit .env and add your ANTHROPIC_API_KEY
 
-# Run over a bounding box
-python orchestrator.py \
-    --model hrrr \
-    --obs   acis \
-    --bbox  41.0 43.5 -89.0 -86.0 \
-    --start 2024-06-01 \
-    --end   2024-06-03 \
-    --var   precipitation
+# Run using a WRF geo_em domain file (recommended)
+python orchestrator.py --start 2024-06-01 --end 2024-06-03 --geo /path/to/geo_em.d01.nc --obs-cutoff 12 --retries 5
 
-# Run using a WRF geo_em domain file
-python orchestrator.py \
-    --model hrrr \
-    --obs   acis \
-    --geo   /path/to/geo_em.d01.nc \
-    --start 2024-06-01 \
-    --end   2024-06-03 \
-    --var   precipitation
+# Run over a manual bounding box
+python orchestrator.py --start 2024-06-01 --end 2024-06-03 --bbox 41.0 43.5 -89.0 -86.0 --obs-cutoff 12 --retries 5
 ```
+
+> **Note:** Do not use `--hours` for precipitation verification runs. wxCal downloads the f01 (1-hour accumulation) from each HRRR initialization cycle. Restricting to a subset of cycles (e.g. `--hours 0 6 12 18`) results in only 4 of 24 hourly buckets being available, severely underestimating daily model accumulations.
 
 Outputs land in `data/output/`:
 - `wxcal_precipitation_YYYYMMDD_YYYYMMDD_corrected.nc` — bias-corrected NetCDF
@@ -243,7 +247,7 @@ Time range:
   --end   YYYY-MM-DD        End date (required)
 
 Domain (choose one):
-  --geo   PATH              WRF geo_em.d01.nc file
+  --geo   PATH              WRF geo_em.d01.nc file (recommended — derives exact domain)
   --bbox  LAT_MIN LAT_MAX LON_MIN LON_MAX
   --dx    KM                Grid spacing when using --bbox (default: 3 km)
 
@@ -260,8 +264,8 @@ Output:
   --format  netcdf|zarr|both
 
 Agent:
-  --llm     MODEL           LLM model string (default: claude-sonnet-4-6)
-  --retries N               Max correction retries (default: 3)
+  --llm     MODEL           LLM model string (default: anthropic/claude-sonnet-4-6)
+  --retries N               Max correction attempts across both methods (default: 3, recommend 5)
   --workers N               Parallel download threads (default: 4)
 ```
 
@@ -282,29 +286,52 @@ On Motus Cloud, LLM credentials are injected automatically — no `.env` needed.
 
 ### IDW — Inverse Distance Weighting
 
-Builds a spatially-varying multiplicative ratio field from station observations and applies it to every model grid point. Best for stratiform precipitation and temperature where the bias is spatially coherent.
+Builds a spatially-varying multiplicative ratio field from station observations and applies it to every model grid point. For grid points where the model is dry but observations are wet, an additive offset is interpolated instead — distributing the observed daily total evenly across the actual window hours. Best when the obs-model signal is spatially coherent: the model and observations agree on where precipitation occurs, and the bias varies gradually across the domain.
+
+**Parameter tuning:** before applying IDW, the agent searches a 5×5 grid of power values (p ∈ {1.0, 1.5, 2.0, 2.5, 3.0}) and search radii (50, 75, 100, 150, 200 km) via leave-one-out cross-validation at station locations. The 25 combinations run in parallel; the combination with the lowest LOO-RMSE is used. A high LOO-RMSE across all combinations is itself a signal that IDW cannot recover meaningful structure, in which case QM is tried instead.
 
 ### Quantile Mapping
 
-Maps the model precipitation distribution to the observed distribution by constructing a piecewise-linear quantile transfer function from all station-day pairs. Applied uniformly across the grid. Best for convective precipitation where phase errors make spatially-varying corrections unreliable.
+Maps the model precipitation distribution to the observed distribution by constructing a piecewise-linear quantile transfer function from all station-day pairs. The transfer function is trained on daily accumulations and applied per obs window: the window is summed to a daily total, mapped through the transfer function, then the corrected total is distributed back to individual hours proportionally. Applied uniformly across the grid. Best when the signal is spatially variable: phase errors or localised extremes make a spatially-varying ratio field unreliable.
 
-### Regime Diagnosis
+### Signal Characterisation
 
-Before correction, the agent computes:
-- **CV** (spatial coefficient of variation of daily model precipitation)
-- **r** (Pearson correlation between station observations and nearest-neighbour model values)
+Before correction, the agent computes two diagnostics per day:
+- **CV** — spatial coefficient of variation of daily model precipitation (measures how concentrated precipitation is)
+- **r** — Pearson correlation between station observations and nearest-neighbour model values (measures obs-model spatial agreement)
 
-| CV > 2 or r < 0.3 | → Convective → Quantile Mapping first |
-|---|---|
-| Otherwise | → Stratiform → IDW first |
+| Signal | Criteria | Consistent with | First method |
+|---|---|---|---|
+| Spatially coherent | CV ≤ 2.0 and r ≥ 0.3 | Widespread frontal precipitation, well-organised rain shields, any event where the model captures the large-scale spatial pattern | IDW |
+| Spatially variable | CV > 2.0 or r < 0.3 | Convective cells, embedded convection, MCS cores, spatial phase errors | Quantile Mapping |
 
-If the first method degrades RMSE by more than 5%, the agent falls back to the other. If neither improves the baseline, the correction is rejected and uncorrected data is returned.
+The thresholds are indicative; the agent uses judgement when values are near the boundary. If the first method degrades RMSE by more than 5% even after parameter tuning, the agent tries the other. If neither improves the baseline, the correction is rejected and uncorrected data is returned.
+
+---
+
+## Validation Metrics
+
+All metrics are computed at station locations using nearest-neighbour model interpolation. Both pre- and post-correction values are reported for every attempt.
+
+| Metric | Symbol | Description |
+|---|---|---|
+| Bias | — | Mean model minus observed (mm) |
+| MAE | — | Mean absolute error (mm) |
+| RMSE | — | Root mean square error (mm) |
+| Correlation | r | Pearson correlation between model and observed |
+| Kling-Gupta Efficiency | KGE | Combines correlation, variability ratio, and bias ratio; 1 = perfect |
+| Probability of Detection | POD | Fraction of observed wet days correctly forecast wet (threshold 0.1 mm) |
+| False Alarm Ratio | FAR | Fraction of forecast wet days that were actually dry |
+| Frequency Bias | — | Ratio of forecast wet events to observed wet events; 1 = unbiased |
+| p95 Ratio | — | Model 95th percentile divided by observed 95th percentile; 1 = unbiased upper tail |
 
 ---
 
 ## Observation Accumulation Window
 
-CoCoRaHS and ACIS observers read gauges at approximately 7 am local time — 12:00 UTC in Central Daylight Time. An observation labelled date *D* represents the 24-hour window `[D-1 12:00 UTC, D 12:00 UTC)`. wxCal sums model hourly fields over that same window (`--obs-cutoff 12`) to avoid the 12-hour phase offset that would otherwise degrade spatial correlation for convective events.
+CoCoRaHS and ACIS observers read gauges at approximately 7 am local time — 12:00 UTC in Central Daylight Time. An observation labelled date *D* represents the 24-hour window `[D-1 12:00 UTC, D 12:00 UTC)`. wxCal sums model hourly fields over that same window (`--obs-cutoff 12`) to avoid the 12-hour phase offset that would otherwise degrade spatial correlation.
+
+The bias correction is applied exclusively to the hours within each window — no leakage to hours outside the window — so the corrected accumulation is always consistent with the observation it was trained on.
 
 ---
 
@@ -315,11 +342,11 @@ CoCoRaHS and ACIS observers read gauges at approximately 7 am local time — 12:
 | [LithosAI Motus](https://motus.lithosai.com) | Agent orchestration (`ReActAgent`, `@tool`, cloud deploy) |
 | [Anthropic Claude](https://anthropic.com) | LLM backbone for all three agents |
 | [xarray](https://xarray.pydata.org) | Gridded model data (NetCDF / Zarr) |
-| [scipy](https://scipy.org) | `cKDTree` nearest-neighbour, quantile functions |
+| [scipy](https://scipy.org) | `cKDTree` nearest-neighbour, LOO-CV, quantile functions |
 | [NOAA HRRR S3](https://registry.opendata.aws/noaa-hrrr-pds/) | Public model archive |
 | [NOAA ACIS API](https://www.rcc-acis.org) | Multi-network station observations |
 | [XeLaTeX](https://tug.org/xetex/) | PDF report compilation |
-| [matplotlib](https://matplotlib.org) | Spatial maps and scatter plots |
+| [matplotlib](https://matplotlib.org) / [geopandas](https://geopandas.org) | Spatial maps, boundary overlays, animated GIFs |
 
 ---
 
@@ -328,21 +355,22 @@ CoCoRaHS and ACIS observers read gauges at approximately 7 am local time — 12:
 ```
 wxcal/
 ├── orchestrator.py          # Pipeline entry point
+├── wxcal_serve.py           # Motus cloud serve entry point
 ├── config.py                # WxCalConfig dataclass
 ├── agents/
 │   ├── qaqc_agent.py        # QA/QC ReActAgent
-│   ├── correction_agent.py  # Bias correction ReActAgent
+│   ├── correction_agent.py  # Bias correction ReActAgent (signal diagnosis, LOO-CV tuning, IDW + QM)
 │   └── report_agent.py      # Report ReActAgent + LaTeX builder
 ├── tools/
 │   ├── ingest.py            # HRRR / ERA5 / local file loader
 │   ├── observations.py      # ACIS API + CSV loader
 │   ├── regrid.py            # xESMF / scipy reprojection
 │   ├── correct.py           # IDW + Quantile Mapping engines
-│   ├── validate.py          # Bias / RMSE / correlation metrics
+│   ├── validate.py          # Bias / RMSE / KGE / categorical metrics
 │   ├── qaqc.py              # QA/QC operations
 │   └── export.py            # NetCDF / Zarr writer
 ├── utils/
-│   ├── client.py            # Motus client selector (local Anthropic vs cloud proxy)
+│   ├── client.py            # LLM client selector (Anthropic / OpenAI / Motus Cloud)
 │   ├── accumulation.py      # Obs accumulation window helper
 │   └── geo.py               # Coordinate utilities
 └── assets/

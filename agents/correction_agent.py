@@ -55,19 +55,23 @@ Your workflow:
    wet fraction). Read both -- the label is a guide, not a hard rule. The
    thresholds that produce the label (CV > 2, r < 0.3) are indicative, so use
    your judgement when values are near the boundary.
-2. If spatially_coherent: try IDW first. If IDW degrades RMSE > 5%, try QM.
-3. If spatially_variable: try QM first. If QM degrades RMSE > 5%, try IDW.
+2. If spatially_coherent:
+   a. Call tune_idw_parameters — it finds the best (p, radius_km) via leave-one-out
+      cross-validation at station locations. Use the returned best_p and
+      best_radius_km directly; do not guess or override unless the LOO-RMSE is
+      suspiciously high (e.g. > 5× the pre-correction RMSE).
+   b. Call apply_correction with those parameters.
+   c. If RMSE still degrades > 5%, the signal is not recoverable by IDW regardless
+      of parameters — try QM.
+3. If spatially_variable:
+   a. Try QM first (apply_qm_correction).
+   b. If QM degrades RMSE > 5%, call tune_idw_parameters then apply_correction
+      as a fallback.
 4. You have up to {max_retries} total attempts across both methods.
 5. Accept the best result, or reject all corrections if none improve performance.
 6. Call finish_correction with your final decision and full reasoning.
 
 ALWAYS call narrate() before each major step.
-
-IDW parameter guidance:
-- Dense network (>10 stn/10,000 km²): radius 50 km, p = 2
-- Sparse network (<3 stn/10,000 km²): radius 100 km, p = 1.5
-- High spatial variability (elevated CV): lower radius, higher p
-- Smooth large-scale bias (low CV, high r): larger radius, lower p
 """.strip()
 
 
@@ -262,8 +266,129 @@ class CorrectionAgent:
             })
             return json.dumps(metrics, indent=2, default=str)
 
+        @tool
+        def tune_idw_parameters() -> str:
+            """
+            Find the best IDW (p, radius_km) via leave-one-out cross-validation
+            at station locations across all days in the period.
+            Tries 25 combinations in parallel (p ∈ {1.0,1.5,2.0,2.5,3.0},
+            radius ∈ {50,75,100,150,200} km). Call this before apply_correction
+            so you use data-driven parameters instead of heuristic guesses.
+            Returns best_p, best_radius_km, and full CV scores.
+            """
+            import itertools
+            import math
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            import numpy as np
+            from scipy.spatial import cKDTree
+
+            from utils.accumulation import day_accumulation
+            from utils.geo import EARTH_RADIUS_KM, km_to_chord, latlon_to_xyz
+
+            _log("Tuning IDW parameters via leave-one-out CV…")
+
+            if self.ds_model is None or self.df_obs is None:
+                return "No data loaded."
+
+            df = self.df_obs.copy()
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            grid_lat = self.ds_model["lat"].values
+            grid_lon = self.ds_model["lon"].values
+            min_thresh = 0.1
+            max_ratio  = 10.0
+            obs_cutoff = getattr(cfg, "obs_utc_cutoff", 0)
+
+            # Collect station-day ratios (obs/model) where model is wet
+            all_lats, all_lons, all_ratios = [], [], []
+            days = sorted({pd.Timestamp(t).date() for t in self.ds_model.time.values})
+            grid_tree = cKDTree(latlon_to_xyz(grid_lat.ravel(), grid_lon.ravel()))
+
+            for day in days:
+                model_day = day_accumulation(self.ds_model, self.variable, day, obs_cutoff)
+                obs_day   = df[df["date"] == day].dropna(subset=["value"])
+                if obs_day.empty:
+                    continue
+                _, idx = grid_tree.query(
+                    latlon_to_xyz(obs_day["lat"].values, obs_day["lon"].values),
+                    k=1, workers=-1)
+                mdl_at = model_day.ravel()[idx].astype(float)
+                obs_mm = obs_day["value"].values.astype(float)
+                for i in range(len(mdl_at)):
+                    if (mdl_at[i] > min_thresh and np.isfinite(obs_mm[i])
+                            and obs_mm[i] >= 0):
+                        ratio = min(obs_mm[i] / mdl_at[i], max_ratio)
+                        all_lats.append(obs_day["lat"].values[i])
+                        all_lons.append(obs_day["lon"].values[i])
+                        all_ratios.append(ratio)
+
+            n = len(all_lats)
+            if n < 5:
+                return json.dumps({"error": "too few wet station-day pairs for CV",
+                                   "n": n, "best_p": 2.0, "best_radius_km": 100})
+
+            lats   = np.array(all_lats)
+            lons   = np.array(all_lons)
+            ratios = np.array(all_ratios)
+            xyz    = latlon_to_xyz(lats, lons)
+            stn_tree = cKDTree(xyz)
+
+            p_values      = [1.0, 1.5, 2.0, 2.5, 3.0]
+            radius_values = [50, 75, 100, 150, 200]
+            k_query       = min(n, 51)  # +1 so we can drop the self-match
+
+            # Pre-query once for the largest radius to reuse distances
+            max_chord = km_to_chord(max(radius_values))
+            cd_all, ni_all = stn_tree.query(xyz, k=k_query,
+                                            distance_upper_bound=max_chord,
+                                            workers=-1)
+            if cd_all.ndim == 1:
+                cd_all = cd_all[:, np.newaxis]
+                ni_all = ni_all[:, np.newaxis]
+
+            def _loo_rmse(p: float, radius_km: float) -> float:
+                chord = km_to_chord(radius_km)
+                errors = []
+                for i in range(n):
+                    row_cd = cd_all[i]
+                    row_ni = ni_all[i]
+                    # exclude self and points beyond this radius
+                    mask = (row_ni != i) & (row_cd <= chord) & np.isfinite(row_cd)
+                    if not mask.any():
+                        continue
+                    d_km = (2.0 * EARTH_RADIUS_KM
+                            * np.arcsin(np.clip(row_cd[mask] * 0.5, 0.0, 1.0)))
+                    d_km = np.maximum(d_km, 1e-3)
+                    w    = 1.0 / d_km ** p
+                    pred = float(np.dot(w, ratios[row_ni[mask]]) / w.sum())
+                    errors.append(pred - ratios[i])
+                return float(np.sqrt(np.mean(np.array(errors) ** 2))) if errors else math.nan
+
+            results = []
+            with ThreadPoolExecutor() as ex:
+                futures = {ex.submit(_loo_rmse, p, r): (p, r)
+                           for p, r in itertools.product(p_values, radius_values)}
+                for fut in as_completed(futures):
+                    p, r = futures[fut]
+                    rmse = fut.result()
+                    results.append({"p": p, "radius_km": r, "loo_rmse": round(rmse, 4)})
+
+            results.sort(key=lambda x: x["loo_rmse"] if math.isfinite(x["loo_rmse"]) else 1e9)
+            best = results[0]
+            _log(f"  Best: p={best['p']}, radius={best['radius_km']} km,"
+                 f" LOO-RMSE={best['loo_rmse']:.4f}  (n={n} station-day pairs)")
+
+            return json.dumps({
+                "best_p":         best["p"],
+                "best_radius_km": best["radius_km"],
+                "best_loo_rmse":  best["loo_rmse"],
+                "n_station_days": n,
+                "top_5":          results[:5],
+            }, indent=2)
+
         tools = [narrate, get_station_density, get_bias_overview,
-                 diagnose_regime, apply_correction, apply_qm_correction,
+                 diagnose_regime, tune_idw_parameters,
+                 apply_correction, apply_qm_correction,
                  finish_correction]
 
         client, model_name = make_client(cfg.llm_model)

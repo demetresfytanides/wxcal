@@ -37,6 +37,7 @@ def _build_ratio_field(
     grid_lat: np.ndarray, grid_lon: np.ndarray,
     idw_power: float, max_dist_km: float,
     min_stations: int, max_ratio: float, min_thresh: float,
+    n_window_hours: int = 24,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorised chunk IDW — returns (ratio_field, additive_field), shape (ny, nx)."""
     ny, nx = model_daily.shape
@@ -54,7 +55,10 @@ def _build_ratio_field(
     model_pos = mdl_v > min_thresh
     ratios = np.where(model_pos, obs_v / np.where(model_pos, mdl_v, 1.0), np.nan)
     ratios = np.clip(ratios, 0.0, max_ratio)
-    additive_stn = np.where(~model_pos & (obs_v > min_thresh), obs_v / 24.0, 0.0)
+    # Distribute the observed daily total evenly across the actual window hours
+    # so that summing the corrected hours recovers the observed daily total.
+    additive_stn = np.where(~model_pos & (obs_v > min_thresh),
+                            obs_v / max(n_window_hours, 1), 0.0)
 
     tree      = cKDTree(latlon_to_xyz(s_lat, s_lon))
     max_chord = km_to_chord(max_dist_km)
@@ -165,6 +169,7 @@ def apply_correction(
             window_sum, mdl_at_stns, obs_mm, stn_lat, stn_lon,
             grid_lat, grid_lon, idw_power, radius_km,
             min_stations, max_ratio, min_thresh,
+            n_window_hours=int(mask.sum()),
         )
 
         # Apply to exactly the window hours — no leakage to other hours
