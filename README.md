@@ -130,9 +130,10 @@ wxCal requires an LLM API key for the three agents. Choose one backend:
 
 1. Install the Motus CLI: `uv tool install lithosai-motus`
 2. Log in: `motus login`
-3. Deploy: `motus deploy orchestrator:run`
+3. Deploy: `motus deploy --name wxcal wxcal_serve:wxcal_agent`
 
    API keys are injected automatically on Motus Cloud — no `.env` needed there.
+   Subsequent deploys read `motus.toml` automatically: just run `motus deploy`.
 
 **Option C — OpenRouter (any model, local)**
 
@@ -142,6 +143,65 @@ wxCal requires an LLM API key for the three agents. Choose one backend:
    MOTUS_CLOUD=1
    OPENAI_API_KEY=sk-or-...
    ```
+
+---
+
+## Deploying to LithosAI Motus Cloud
+
+wxCal can be served as a cloud agent on [LithosAI Motus](https://motus.lithosai.com). Two additions to the codebase make this work:
+
+### 1. `wxcal_serve.py` — Motus serve entry point
+
+The core pipeline (`orchestrator.py:run`) is a batch function, not a conversational agent. `wxcal_serve.py` wraps it in a `ReActAgent` that conforms to the Motus serve contract:
+
+- Exposes a single `@tool` — `run_wxcal_pipeline` — with all pipeline parameters as typed arguments
+- The agent LLM parses the user's natural-language request, fills the parameters, and calls the tool
+- The tool constructs a `WxCalConfig`, runs the full pipeline, and returns a dict with output paths
+
+```python
+# The deployed entry point
+wxcal_agent = ReActAgent(
+    client=...,
+    tools=[run_wxcal_pipeline],
+    system_prompt=...,
+)
+```
+
+### 2. `utils/client.py` — LLM client selector
+
+On Motus Cloud the platform injects its own OpenRouter proxy (`OPENAI_BASE_URL` + `OPENAI_API_KEY`) automatically. `make_client()` detects this and switches all three internal agents (QA/QC, correction, report) from `AnthropicChatClient` to `OpenAIChatClient` — no code changes needed between local and cloud runs, and your personal `ANTHROPIC_API_KEY` is never uploaded.
+
+```
+Local:   ANTHROPIC_API_KEY set  →  AnthropicChatClient  →  Anthropic direct
+Cloud:   OPENAI_BASE_URL  set   →  OpenAIChatClient     →  Motus/OpenRouter proxy
+```
+
+### Deploy steps
+
+```bash
+# First deploy (creates the cloud project)
+uv tool install lithosai-motus   # install CLI if needed
+motus login
+motus deploy --name wxcal wxcal_serve:wxcal_agent
+
+# Subsequent deploys (project ID stored in motus.toml)
+motus deploy
+```
+
+### Interact with the deployed agent
+
+After deploying, Motus prints the agent endpoint URL. Use it to send requests:
+
+```bash
+# Single message
+motus serve chat <AGENT_ENDPOINT_URL> \
+  "Run wxCal for 2024-06-01 to 2024-06-03, bbox 41.0 43.5 -89.0 -86.0, precipitation"
+
+# Interactive REPL
+motus serve chat <AGENT_ENDPOINT_URL>
+```
+
+> **Note on output files:** The corrected NetCDF and PDF are written to the container's local filesystem and the paths are returned in the agent's response. For production use with external consumers, add S3/GCS upload to `run_wxcal_pipeline` and return presigned download URLs.
 
 ---
 
