@@ -155,6 +155,9 @@ FORMATTING RULES -- MANDATORY. Violations break the PDF compilation:
   Use ASCII only: -- for dashes, -> for arrows, - for minus.
 - No curly/smart quotes. Straight ASCII quotes only.
 - Separate paragraphs with one blank line. That is all the formatting you need.
+- Do NOT write file paths or directory paths anywhere in the narrative. Refer to
+  outputs as "the corrected dataset" or "the output files listed at the end of
+  this report" -- never as a literal path string.
 
 Call narrate() before each write_section to share what you will write.
 Call write_section for each section, then finish_report.
