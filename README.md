@@ -135,15 +135,6 @@ wxCal requires an LLM API key for the three agents. Choose one backend:
    API keys are injected automatically on Motus Cloud — no `.env` needed there.
    Subsequent deploys read `motus.toml` automatically: just run `motus deploy`.
 
-**Option C — OpenRouter (any model, local)**
-
-1. Create an account at [openrouter.ai](https://openrouter.ai)
-2. Add to your `.env`:
-   ```
-   MOTUS_CLOUD=1
-   OPENAI_API_KEY=sk-or-...
-   ```
-
 ---
 
 ## Deploying to LithosAI Motus Cloud
@@ -169,11 +160,11 @@ wxcal_agent = ReActAgent(
 
 ### 2. `utils/client.py` — LLM client selector
 
-On Motus Cloud the platform injects its own OpenRouter proxy (`OPENAI_BASE_URL` + `OPENAI_API_KEY`) automatically. `make_client()` detects this and switches all three internal agents (QA/QC, correction, report) from `AnthropicChatClient` to `OpenAIChatClient` — no code changes needed between local and cloud runs, and your personal `ANTHROPIC_API_KEY` is never uploaded.
+On Motus Cloud the platform injects LLM credentials automatically via `OPENAI_BASE_URL`. `make_client()` detects this and switches all three internal agents (QA/QC, correction, report) from `AnthropicChatClient` to `OpenAIChatClient` — no code changes needed between local and cloud runs, and your personal `ANTHROPIC_API_KEY` is never uploaded.
 
 ```
-Local:   ANTHROPIC_API_KEY set  →  AnthropicChatClient  →  Anthropic direct
-Cloud:   OPENAI_BASE_URL  set   →  OpenAIChatClient     →  Motus/OpenRouter proxy
+Local:  ANTHROPIC_API_KEY set  →  AnthropicChatClient  →  Anthropic direct
+Cloud:  OPENAI_BASE_URL   set  →  OpenAIChatClient     →  Motus Cloud proxy
 ```
 
 ### Deploy steps
@@ -280,11 +271,9 @@ Agent:
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Direct Anthropic API (local runs) |
-| `MOTUS_CLOUD=1` | Route LLM calls through Motus Cloud / OpenRouter |
-| `OPENAI_API_KEY` | OpenRouter key (when `MOTUS_CLOUD=1`) |
+| `ANTHROPIC_API_KEY` | Required for local runs — direct Anthropic API |
 
-On Motus Cloud, `OPENAI_API_KEY` and `OPENAI_BASE_URL` are injected automatically — no configuration needed.
+On Motus Cloud, LLM credentials are injected automatically — no `.env` needed.
 
 ---
 
@@ -352,7 +341,7 @@ wxcal/
 │   ├── qaqc.py              # QA/QC operations
 │   └── export.py            # NetCDF / Zarr writer
 ├── utils/
-│   ├── client.py            # Motus client selector (Anthropic vs OpenRouter)
+│   ├── client.py            # Motus client selector (local Anthropic vs cloud proxy)
 │   ├── accumulation.py      # Obs accumulation window helper
 │   └── geo.py               # Coordinate utilities
 └── assets/
