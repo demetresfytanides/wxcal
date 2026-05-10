@@ -1,4 +1,4 @@
-<img src="assets/logo.png" alt="wxCal logo" width="800"/>
+<img src="assets/logo.png" alt="wxCal logo" width="600"/>
 
 # wxCal — Weather Calibration Agent
 
