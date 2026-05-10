@@ -498,6 +498,80 @@ def _make_scatter_plots(ds_before: xr.Dataset, ds_after: xr.Dataset,
     return [_save_fig(fig, fig_dir / "scatter_model_vs_obs.png")]
 
 
+def _make_animated_gifs(ds_before: xr.Dataset, ds_after: xr.Dataset,
+                        variable: str, fig_dir: Path,
+                        obs_utc_cutoff: int = 0) -> list[Path]:
+    """
+    Generate animated GIFs cycling through days:
+      - before_<variable>.gif  — raw model daily accumulations
+      - after_<variable>.gif   — corrected model daily accumulations
+      - compare_<variable>.gif — side-by-side before / after / difference
+    """
+    try:
+        import imageio.v3 as iio
+    except ImportError:
+        logger.warning("imageio not available — skipping GIF generation")
+        return []
+
+    grid_lat = ds_before["lat"].values
+    grid_lon = ds_before["lon"].values
+    days = sorted({pd.Timestamp(t).date() for t in ds_before.time.values})
+
+    frames_before, frames_after, frames_compare = [], [], []
+
+    for day in days:
+        pre  = day_accumulation(ds_before, variable, day, obs_utc_cutoff)
+        post = day_accumulation(ds_after,  variable, day, obs_utc_cutoff)
+        diff = post - pre
+
+        def _frame_single(data, cmap, norm, title):
+            fig, ax = plt.subplots(figsize=(7, 5))
+            ax.pcolormesh(grid_lon, grid_lat, data, cmap=cmap, norm=norm, shading="auto")
+            ax.set_title(f"{title} — {day}", fontsize=10)
+            ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
+            fig.tight_layout()
+            buf = fig.canvas.buffer_rgba()
+            img = np.asarray(buf)[..., :3]
+            plt.close(fig)
+            return img
+
+        def _frame_compare(pre, post, diff, day):
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            for ax, data, title, cmap, norm in [
+                (axes[0], pre,  "Before", PRECIP_CMAP, PRECIP_NORM),
+                (axes[1], post, "After",  PRECIP_CMAP, PRECIP_NORM),
+                (axes[2], diff, "Diff",   DIFF_CMAP,   DIFF_NORM),
+            ]:
+                pcm = ax.pcolormesh(grid_lon, grid_lat, data,
+                                    cmap=cmap, norm=norm, shading="auto")
+                plt.colorbar(pcm, ax=ax, label="mm/day", shrink=0.85)
+                ax.set_title(f"{title} — {day}", fontsize=9)
+                ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
+            fig.tight_layout()
+            buf = fig.canvas.buffer_rgba()
+            img = np.asarray(buf)[..., :3]
+            plt.close(fig)
+            return img
+
+        frames_before.append(_frame_single(pre,  PRECIP_CMAP, PRECIP_NORM, "Before correction"))
+        frames_after.append( _frame_single(post, PRECIP_CMAP, PRECIP_NORM, "After correction"))
+        frames_compare.append(_frame_compare(pre, post, diff, day))
+
+    paths = []
+    for name, frames in [
+        (f"before_{variable}.gif",  frames_before),
+        (f"after_{variable}.gif",   frames_after),
+        (f"compare_{variable}.gif", frames_compare),
+    ]:
+        if frames:
+            p = fig_dir / name
+            iio.imwrite(str(p), frames, extension=".gif", duration=800, loop=0)
+            paths.append(p)
+            logger.info(f"  GIF saved → {p}")
+
+    return paths
+
+
 # ── LaTeX compilation ──────────────────────────────────────────────────────────
 
 def _compile_latex(tex_path: Path) -> Path:
@@ -572,8 +646,10 @@ class ReportAgent:
         logger.info("Generating scatter plots...")
         scatter_paths = _make_scatter_plots(ds_before, ds_after, df_obs,
                                              variable, fig_dir, cutoff)
-        logger.info(f"  {len(fig_paths)} map(s), {len(scatter_paths)} scatter plot(s) "
-                    f"saved to {fig_dir}")
+        logger.info("Generating animated GIFs...")
+        gif_paths     = _make_animated_gifs(ds_before, ds_after, variable, fig_dir, cutoff)
+        logger.info(f"  {len(fig_paths)} map(s), {len(scatter_paths)} scatter plot(s), "
+                    f"{len(gif_paths)} GIF(s) saved to {fig_dir}")
 
         prompt = (
             f"Write the wxCal report for this run.\n\n"
@@ -594,7 +670,7 @@ class ReportAgent:
 
         with tempfile.TemporaryDirectory(prefix="wxcal_report_") as tmp:
             tmp_dir  = Path(tmp)
-            tex      = self._build_latex(fig_paths, scatter_paths, variable,
+            tex      = self._build_latex(fig_paths, scatter_paths, gif_paths, variable,
                                           qaqc_log, correction_log, output_paths)
             tex_path = tmp_dir / "report.tex"
             tex_path.write_text(tex, encoding="utf-8")
@@ -605,6 +681,7 @@ class ReportAgent:
         return pdf_path
 
     def _build_latex(self, fig_paths: list[Path], scatter_paths: list[Path],
+                      gif_paths: list[Path],
                       variable: str, qaqc_log: list[dict],
                       correction_log: list[dict], output_paths: list[Path]) -> str:
         cfg = self.config
@@ -723,6 +800,18 @@ class ReportAgent:
                 f"Red dots: station locations (before-correction panel only).",
             ))
 
+        if gif_paths:
+            lines += [r"\subsection*{Animated GIFs}", ""]
+            lines.append(
+                r"The following animated GIF files are saved alongside this report "
+                r"and can be viewed in any web browser or image viewer. "
+                r"Each GIF cycles through the analysis days at 0.8 seconds per frame."
+            )
+            lines += [r"\begin{itemize}"]
+            for p in gif_paths:
+                lines.append(rf"  \item \texttt{{{_tex(p.name)}}} --- {_tex(p.stem.replace('_', ' '))}")
+            lines += [r"\end{itemize}", r"\clearpage"]
+
         lines += [
             r"\section{Conclusions}",
             _md_to_tex(sec("conclusions", "No conclusions written.")),
@@ -732,6 +821,8 @@ class ReportAgent:
         ]
         for p in output_paths:
             lines.append(rf"  \item \texttt{{{_tex(str(p))}}}")
+        for p in gif_paths:
+            lines.append(rf"  \item \texttt{{{_tex(str(p))}}} (animated GIF)")
         lines += [r"\end{itemize}", r"\end{document}"]
 
         return "\n".join(lines)

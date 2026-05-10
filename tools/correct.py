@@ -98,6 +98,15 @@ def _build_ratio_field(
     return ratio_flat.reshape(ny, nx), additive_flat.reshape(ny, nx)
 
 
+def _window_mask(times: pd.DatetimeIndex, day, obs_utc_cutoff: int) -> np.ndarray:
+    """Boolean mask for the hours belonging to this observation date's accumulation window."""
+    if obs_utc_cutoff == 0:
+        return (times.date == day)
+    t_end   = pd.Timestamp(day) + pd.Timedelta(hours=obs_utc_cutoff)
+    t_start = t_end - pd.Timedelta(hours=24)
+    return ((times >= t_start) & (times < t_end)).values
+
+
 def apply_correction(
     ds_model: xr.Dataset,
     df_obs: pd.DataFrame,
@@ -110,31 +119,40 @@ def apply_correction(
     obs_utc_cutoff: int = 0,
 ) -> tuple[xr.Dataset, list[dict]]:
     """
-    Apply IDW bias correction day-by-day.
-    Returns (corrected_dataset, per_day_reports).
+    Apply IDW bias correction window-by-window.
+
+    Each observation date's accumulation window [D-1 cutoff, D cutoff) is
+    corrected using only the model hours in that window, so ratios and the
+    corrected hours are always consistent. This avoids the bug where ratios
+    computed from a 12:00 UTC window get applied to calendar-day hours that
+    fall outside that window (e.g. afternoon convective hours on June 1 that
+    were not part of the May31→June1 accumulation but still got scaled).
     """
     grid_lat = ds_model["lat"].values
     grid_lon = ds_model["lon"].values
-    df_obs = df_obs.copy()
+    df_obs   = df_obs.copy()
     df_obs["date"] = pd.to_datetime(df_obs["date"]).dt.date
+    times    = pd.DatetimeIndex(ds_model["time"].values)
 
-    corrected_days = []
+    # Work on a mutable copy of the full data array
+    corrected_data = ds_model[variable].values.copy()   # (n_time, ny, nx)
     reports = []
 
-    days = sorted({pd.Timestamp(t).date() for t in ds_model.time.values})
-    for day in days:
-        day_mask  = ds_model["time"].dt.date == day
-        ds_day    = ds_model.sel(time=day_mask)
-        data_3d   = ds_day[variable].values          # (n_hours, ny, nx)
-        daily_sum = day_accumulation(ds_model, variable, day, obs_utc_cutoff)
+    obs_dates = sorted(df_obs["date"].unique())
+    for day in obs_dates:
+        mask = _window_mask(times, day, obs_utc_cutoff)
+        if not mask.any():
+            continue
 
-        obs_day   = df_obs[df_obs["date"] == day].dropna(subset=["value"])
-        rep       = {"date": str(day), "n_stations": len(obs_day),
-                     "idw_power": idw_power, "radius_km": radius_km}
+        window_data = corrected_data[mask]              # (n_window_hours, ny, nx)
+        window_sum  = window_data.sum(axis=0)           # (ny, nx) daily accumulation
+
+        obs_day = df_obs[df_obs["date"] == day].dropna(subset=["value"])
+        rep     = {"date": str(day), "n_stations": len(obs_day),
+                   "idw_power": idw_power, "radius_km": radius_km}
 
         if obs_day.empty or len(obs_day) < min_stations:
             rep["correction"] = "skipped — insufficient observations"
-            corrected_days.append(ds_day)
             reports.append(rep)
             continue
 
@@ -142,40 +160,41 @@ def apply_correction(
         stn_lon = obs_day["lon"].values
         obs_mm  = obs_day["value"].values
 
-        mdl_at_stns = _interp_to_stations(daily_sum, grid_lat, grid_lon, stn_lat, stn_lon)
+        mdl_at_stns = _interp_to_stations(window_sum, grid_lat, grid_lon, stn_lat, stn_lon)
         ratio, additive = _build_ratio_field(
-            daily_sum, mdl_at_stns, obs_mm, stn_lat, stn_lon,
+            window_sum, mdl_at_stns, obs_mm, stn_lat, stn_lon,
             grid_lat, grid_lon, idw_power, radius_km,
             min_stations, max_ratio, min_thresh,
         )
 
-        zero_mask = data_3d < min_thresh
-        corrected = np.where(zero_mask, data_3d + additive[np.newaxis],
-                             data_3d * ratio[np.newaxis])
-        corrected = np.clip(corrected, 0.0, None)
+        # Apply to exactly the window hours — no leakage to other hours
+        zero_mask = window_data < min_thresh
+        corrected_window = np.where(zero_mask,
+                                    window_data + additive[np.newaxis],
+                                    window_data * ratio[np.newaxis])
+        corrected_window = np.clip(corrected_window, 0.0, None)
+        corrected_data[mask] = corrected_window
 
         rep.update({
-            "model_daily_mean_before": float(np.nanmean(daily_sum)),
-            "model_daily_mean_after":  float(np.nanmean(corrected.sum(axis=0))),
+            "model_daily_mean_before": float(np.nanmean(window_sum)),
+            "model_daily_mean_after":  float(np.nanmean(corrected_window.sum(axis=0))),
             "obs_daily_mean":          float(np.nanmean(obs_mm)),
             "ratio_mean":              float(np.nanmean(ratio)),
             "correction":              "applied",
         })
         reports.append(rep)
-
-        ds_c = ds_day.copy()
-        ds_c[variable] = xr.DataArray(corrected, dims=ds_day[variable].dims,
-                                       coords=ds_day[variable].coords,
-                                       attrs={**ds_day[variable].attrs,
-                                              "bias_corrected": "IDW"})
-        corrected_days.append(ds_c)
         logger.info(
             f"{day}: {len(obs_day)} stn, "
             f"mean {rep['model_daily_mean_before']:.2f} → "
             f"{rep['model_daily_mean_after']:.2f}"
         )
 
-    return xr.concat(corrected_days, dim="time"), reports
+    ds_out = ds_model.copy()
+    ds_out[variable] = xr.DataArray(
+        corrected_data, dims=ds_model[variable].dims,
+        coords=ds_model[variable].coords,
+        attrs={**ds_model[variable].attrs, "bias_corrected": "IDW"})
+    return ds_out, reports
 
 
 def apply_quantile_mapping(
@@ -228,12 +247,22 @@ def apply_quantile_mapping(
     model_q   = np.percentile(model_vals, quantiles)
     obs_q     = np.percentile(obs_vals,   quantiles)
 
-    data      = ds_model[variable].values.copy()   # (n_time, ny, nx)
-    corrected = np.interp(data, model_q, obs_q).clip(0).astype(np.float32)
+    # Apply transfer function only within each observation window (same window
+    # consistency fix as IDW — avoids applying a ratio calibrated for one 24h
+    # window to hours outside that window).
+    times          = pd.DatetimeIndex(ds_model["time"].values)
+    corrected_data = ds_model[variable].values.copy()
+    obs_dates      = sorted(df_obs["date"].unique())
+    for day in obs_dates:
+        mask = _window_mask(times, day, obs_utc_cutoff)
+        if not mask.any():
+            continue
+        corrected_data[mask] = np.interp(
+            corrected_data[mask], model_q, obs_q).clip(0).astype(np.float32)
 
     ds_out = ds_model.copy()
     ds_out[variable] = xr.DataArray(
-        corrected, dims=ds_model[variable].dims,
+        corrected_data, dims=ds_model[variable].dims,
         coords=ds_model[variable].coords,
         attrs={**ds_model[variable].attrs, "bias_corrected": "quantile_mapping"})
 
