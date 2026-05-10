@@ -247,18 +247,24 @@ def apply_quantile_mapping(
     model_q   = np.percentile(model_vals, quantiles)
     obs_q     = np.percentile(obs_vals,   quantiles)
 
-    # Apply transfer function only within each observation window (same window
-    # consistency fix as IDW — avoids applying a ratio calibrated for one 24h
-    # window to hours outside that window).
+    # Apply QM per obs window: correct the daily accumulation then distribute
+    # back to hours proportionally (same approach as IDW).  Applying the
+    # transfer function directly to hourly values would be wrong because the
+    # CDF was trained on daily totals — a 2 mm/hr hour would look like the
+    # 90th percentile of the daily distribution and be inflated catastrophically.
+    n_paired       = int(len(model_vals))
     times          = pd.DatetimeIndex(ds_model["time"].values)
     corrected_data = ds_model[variable].values.copy()
     obs_dates      = sorted(df_obs["date"].unique())
     for day in obs_dates:
-        mask = _window_mask(times, day, obs_utc_cutoff)
-        if not mask.any():
+        wmask = _window_mask(times, day, obs_utc_cutoff)
+        if not wmask.any():
             continue
-        corrected_data[mask] = np.interp(
-            corrected_data[mask], model_q, obs_q).clip(0).astype(np.float32)
+        window_data   = corrected_data[wmask]                    # (n_hours, ny, nx)
+        daily_sum     = window_data.sum(axis=0)                  # (ny, nx)
+        corrected_day = np.interp(daily_sum, model_q, obs_q).clip(0).astype(np.float32)
+        scale = np.where(daily_sum > 1e-6, corrected_day / daily_sum, 1.0)
+        corrected_data[wmask] = (window_data * scale[np.newaxis]).clip(0)
 
     ds_out = ds_model.copy()
     ds_out[variable] = xr.DataArray(
@@ -268,7 +274,7 @@ def apply_quantile_mapping(
 
     return ds_out, [{
         "method":       "quantile_mapping",
-        "n_paired":     int(mask.sum()),
+        "n_paired":     n_paired,
         "n_quantiles":  n_quantiles,
         "model_median": float(np.median(model_vals)),
         "obs_median":   float(np.median(obs_vals)),

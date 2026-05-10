@@ -526,10 +526,12 @@ def _make_animated_gifs(ds_before: xr.Dataset, ds_after: xr.Dataset,
 
         def _frame_single(data, cmap, norm, title):
             fig, ax = plt.subplots(figsize=(7, 5))
-            ax.pcolormesh(grid_lon, grid_lat, data, cmap=cmap, norm=norm, shading="auto")
+            pcm = ax.pcolormesh(grid_lon, grid_lat, data, cmap=cmap, norm=norm, shading="auto")
+            plt.colorbar(pcm, ax=ax, label="mm/day", shrink=0.85)
             ax.set_title(f"{title} — {day}", fontsize=10)
             ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
             fig.tight_layout()
+            fig.canvas.draw()
             buf = fig.canvas.buffer_rgba()
             img = np.asarray(buf)[..., :3]
             plt.close(fig)
@@ -548,6 +550,7 @@ def _make_animated_gifs(ds_before: xr.Dataset, ds_after: xr.Dataset,
                 ax.set_title(f"{title} — {day}", fontsize=9)
                 ax.set_xlabel("Lon"); ax.set_ylabel("Lat")
             fig.tight_layout()
+            fig.canvas.draw()
             buf = fig.canvas.buffer_rgba()
             img = np.asarray(buf)[..., :3]
             plt.close(fig)
