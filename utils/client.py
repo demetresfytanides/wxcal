@@ -32,7 +32,8 @@ def make_client(model: str) -> tuple:
                 "Please re-run with an OpenAI model, for example:\n\n"
                 "    python orchestrator.py ... --llm gpt-4o\n"
                 "    python orchestrator.py ... --llm gpt-4.1\n\n"
-                "Or unset OPENAI_API_KEY and set ANTHROPIC_API_KEY to use Claude.\n",
+                "Or unset OPENAI_API_KEY and set ANTHROPIC_API_KEY to use Claude directly,\n"
+                "or deploy to Motus Cloud where credentials are handled automatically.\n",
                 file=sys.stderr,
             )
             sys.exit(1)
