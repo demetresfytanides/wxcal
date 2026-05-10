@@ -291,16 +291,26 @@ def diagnose_regime(
     obs_utc_cutoff: int = 0,
 ) -> dict:
     """
-    Classify precipitation regime as convective or stratiform.
+    Characterise the obs-model signal as spatially_coherent or spatially_variable.
 
-    Convective indicators:
-      - High spatial coefficient of variation (CV > 2.0): precipitation is
-        concentrated in small cells, not spread uniformly across the domain.
-      - Low obs-model spatial correlation (r < 0.3): the model places storms
-        in different locations than observed (phase error), so a spatially-
-        varying ratio field like IDW would amplify rather than reduce errors.
+    These labels describe the statistical relationship between model output and
+    observations — not the meteorological storm type.
 
-    Stratiform indicators: low CV, high spatial correlation — IDW works well.
+    spatially_variable (CV > 2.0 or r < 0.3):
+      Precipitation is highly concentrated in space, or the model and observations
+      disagree on where precipitation occurs. Consistent with convective
+      precipitation, embedded convective cells within a broader rain shield,
+      mesoscale convective systems, or spatial phase errors where the model places
+      the storm correctly in aggregate but in the wrong location at the grid scale.
+      A pointwise ratio field (IDW) would interpolate noise rather than signal.
+
+    spatially_coherent (CV <= 2.0 and r >= 0.3):
+      The model and observations agree on the broad spatial distribution of
+      precipitation and the bias field varies gradually across the domain.
+      Consistent with widespread frontal precipitation, well-organised stratiform
+      rain, tropical overcast, or any event where the model captures the large-scale
+      pattern correctly regardless of storm type. IDW can build a meaningful
+      correction field.
     """
     grid_lat = ds_model["lat"].values
     grid_lon = ds_model["lon"].values
@@ -339,19 +349,23 @@ def diagnose_regime(
     mean_corr = float(np.mean(corr_values)) if corr_values else float("nan")
     mean_wet  = float(np.mean(wet_fracs))   if wet_fracs   else 0.0
 
-    is_convective = mean_cv > 2.0 or (np.isfinite(mean_corr) and mean_corr < 0.3)
+    is_variable = mean_cv > 2.0 or (np.isfinite(mean_corr) and mean_corr < 0.3)
 
     return {
-        "regime":            "convective" if is_convective else "stratiform",
+        "regime":            "spatially_variable" if is_variable else "spatially_coherent",
         "mean_cv":           round(mean_cv, 3),
         "mean_spatial_corr": round(mean_corr, 3) if np.isfinite(mean_corr) else None,
         "mean_wet_fraction": round(mean_wet, 3),
         "n_days":            len(days),
         "recommendation": (
-            "Use quantile mapping first — IDW is unreliable for convective "
-            "precipitation due to high spatial variability and/or low obs-model "
-            "spatial correlation (phase errors)."
-            if is_convective else
-            "IDW is appropriate — spatially coherent bias field detected."
+            "Use quantile mapping first — the signal is spatially variable or "
+            "location-uncertain (high CV and/or low obs-model spatial correlation). "
+            "Consistent with convective precipitation, embedded cells, MCS cores, "
+            "or phase errors. A pointwise ratio field (IDW) would interpolate noise."
+            if is_variable else
+            "IDW is appropriate — the signal is spatially coherent (moderate CV, "
+            "adequate obs-model spatial correlation). Consistent with widespread "
+            "frontal precipitation or any event where the model captures the "
+            "large-scale spatial pattern correctly."
         ),
     }

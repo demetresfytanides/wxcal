@@ -421,21 +421,41 @@ spaced quantiles and applied pointwise to every model grid value.
 QM does not alter the spatial pattern of model precipitation -- it only adjusts
 the distribution -- making it robust to convective phase errors.
 
-\subsection*{Regime Diagnosis}
+\subsection*{Signal Characterisation}
 
-Before correction, the pipeline computes two spatial statistics per day:
+Before correction, the pipeline computes two spatial statistics averaged across
+all days in the analysis period:
 
 \begin{itemize}
   \item Coefficient of variation: $\mathrm{CV} = \sigma_M / \mu_M$, where
         $\sigma_M$ and $\mu_M$ are the standard deviation and mean of daily
-        model precipitation over the domain.
+        model precipitation over the domain. High CV indicates that precipitation
+        is spatially concentrated; low CV indicates a broadly distributed field.
   \item Obs--model spatial correlation: Pearson $r$ between observed station
-        values and nearest-neighbour model values at station locations.
+        values and nearest-neighbour model values at station locations. High $r$
+        indicates the model places precipitation in approximately the correct
+        locations; low $r$ indicates spatial disagreement.
 \end{itemize}
 
-A regime is classified as \textit{convective} if $\mathrm{CV} > 2$ or $r < 0.3$,
-and as \textit{stratiform} otherwise. QM is the preferred method for convective
-regimes; IDW is preferred for stratiform.
+These diagnostics characterise the \textit{statistical signal} of the
+model--observation relationship, not the meteorological storm type. The pipeline
+classifies the signal as \textbf{spatially variable} ($\mathrm{CV} > 2$ or
+$r < 0.3$) or \textbf{spatially coherent} ($\mathrm{CV} \leq 2$ and
+$r \geq 0.3$). These thresholds are indicative rather than definitive; the
+correction agent reads both the label and the raw diagnostics and applies
+judgement, particularly when values fall near the boundary.
+
+A spatially coherent signal --- low-to-moderate CV and adequate obs--model
+spatial correlation --- is consistent with widespread frontal precipitation,
+well-organised rain shields, or any event where the model captures the
+large-scale spatial pattern correctly, regardless of storm type. IDW is the
+preferred first method because it can build a meaningful bias ratio field.
+
+A spatially variable signal --- high CV and/or low spatial correlation --- is
+consistent with convective precipitation, embedded convective cells within a
+broader rain shield, mesoscale convective systems, or spatial phase errors where
+the model places precipitation in the wrong location at the grid scale. QM is
+preferred because it corrects the distribution without assuming spatial coherence.
 
 \subsection*{Validation Metrics}
 
