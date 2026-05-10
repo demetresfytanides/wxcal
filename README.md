@@ -52,6 +52,99 @@ Receives all decision logs, writes four narrative sections (executive summary, Q
 
 ---
 
+## Installation
+
+### Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.12 – 3.13 | 3.14 not yet supported |
+| [uv](https://docs.astral.sh/uv/) | latest | Recommended package manager (`pip install uv`) |
+| [XeLaTeX](https://tug.org/xetex/) | any recent | Required for PDF report compilation |
+| conda (optional) | any | Needed only for `xesmf` regridding on macOS ARM |
+
+Install XeLaTeX via your OS package manager:
+```bash
+# macOS
+brew install --cask mactex-no-gui   # or: brew install basictex
+
+# Ubuntu / Debian
+sudo apt install texlive-xetex texlive-fonts-recommended
+```
+
+### Python packages
+
+All Python dependencies are declared in `pyproject.toml` and installed in one step:
+
+```bash
+git clone https://github.com/demetresfytanides/wxcal.git
+cd wxcal
+uv sync
+```
+
+| Package | Purpose |
+|---|---|
+| [`lithosai-motus`](https://pypi.org/project/lithosai-motus/) | Agent orchestration framework — `ReActAgent`, `@tool`, cloud deploy |
+| [`anthropic`](https://pypi.org/project/anthropic/) | Anthropic SDK used by Motus `AnthropicChatClient` |
+| [`xarray`](https://xarray.pydata.org) | Gridded NetCDF / Zarr model data |
+| [`numpy`](https://numpy.org) | Array operations throughout the pipeline |
+| [`scipy`](https://scipy.org) | `cKDTree` nearest-neighbour lookup, quantile functions |
+| [`pandas`](https://pandas.pydata.org) | Observation DataFrames |
+| [`netCDF4`](https://unidata.github.io/netcdf4-python/) | NetCDF read/write backend |
+| [`zarr`](https://zarr.readthedocs.io) | Optional Zarr output format |
+| [`cfgrib`](https://github.com/ecmwf/cfgrib) | GRIB2 decoding for HRRR files |
+| [`eccodes`](https://pypi.org/project/eccodes/) | ECMWF GRIB codec (cfgrib backend) |
+| [`ecmwflibs`](https://pypi.org/project/ecmwflibs/) | Pre-built ECMWF native libraries |
+| [`matplotlib`](https://matplotlib.org) | Spatial maps and scatter plots |
+| [`geopandas`](https://geopandas.org) | Geospatial utilities |
+| [`imageio`](https://imageio.readthedocs.io) | Animated GIF generation |
+| [`pillow`](https://python-pillow.org) | Image processing |
+| [`requests`](https://requests.readthedocs.io) | NOAA ACIS API calls |
+| [`tqdm`](https://tqdm.github.io) | Download progress bars |
+| [`python-dotenv`](https://pypi.org/project/python-dotenv/) | Loads `.env` API keys |
+
+#### Optional: xesmf (faster regridding)
+
+[xesmf](https://xesmf.readthedocs.io) provides conservative regridding and is recommended for production runs. It must be installed via conda on macOS ARM:
+
+```bash
+conda install -c conda-forge xesmf esmf
+```
+
+wxCal automatically falls back to `scipy` nearest-neighbour interpolation if xesmf is unavailable.
+
+### API keys and accounts
+
+wxCal requires an LLM API key for the three agents. Choose one backend:
+
+**Option A — Direct Anthropic API (local runs)**
+
+1. Create an account at [console.anthropic.com](https://console.anthropic.com)
+2. Generate an API key under *API Keys*
+3. Add to your `.env`:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+**Option B — LithosAI Motus Cloud (production / sharing)**
+
+1. Install the Motus CLI: `uv tool install lithosai-motus`
+2. Log in: `motus login`
+3. Deploy: `motus deploy orchestrator:run`
+
+   API keys are injected automatically on Motus Cloud — no `.env` needed there.
+
+**Option C — OpenRouter (any model, local)**
+
+1. Create an account at [openrouter.ai](https://openrouter.ai)
+2. Add to your `.env`:
+   ```
+   MOTUS_CLOUD=1
+   OPENAI_API_KEY=sk-or-...
+   ```
+
+---
+
 ## Quickstart
 
 ```bash
