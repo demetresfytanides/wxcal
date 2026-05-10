@@ -487,7 +487,7 @@ $\varepsilon = 0.1$\,mm the wet/dry occurrence threshold.
                                \sum_{i=1}^{N}(M_i-\bar{M})^2}}
 \end{align}
 
-The Kling--Gupta Efficiency (KGE; \citealt{Gupta2009}) combines correlation,
+The Kling--Gupta Efficiency (KGE; Gupta et al.\ 2009) combines correlation,
 variability ratio, and bias ratio into a single score where $\mathrm{KGE}=1$
 is perfect:
 
