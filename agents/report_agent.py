@@ -44,7 +44,7 @@ _NE_URLS = {
 _GREAT_LAKES = {"Lake Superior", "Lake Michigan", "Lake Huron", "Lake Erie", "Lake Ontario"}
 _COOK_URL = (
     "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_Current"
-    "/MapServer/84/query?where=GEOID+%3D+%2717031%27&outFields=*&outSR=4326&f=geojson"
+    "/MapServer/82/query?where=GEOID%3D%2717031%27&outFields=*&outSR=4326&f=geojson"
 )
 
 
@@ -441,15 +441,56 @@ regimes; IDW is preferred for stratiform.
 
 Performance is evaluated at station locations using nearest-neighbour grid
 interpolation. Let $M_i$ and $O_i$ be model and observed daily accumulations at
-station location $i$, and $N$ the total number of station-day pairs.
+station location $i$, $N$ the total number of station-day pairs, and
+$\varepsilon = 0.1$\,mm the wet/dry occurrence threshold.
+
+\subsubsection*{Continuous metrics}
 
 \begin{align}
   \mathrm{Bias} &= \frac{1}{N}\sum_{i=1}^{N}(M_i - O_i) \\[6pt]
+  \mathrm{MAE}  &= \frac{1}{N}\sum_{i=1}^{N}|M_i - O_i| \\[6pt]
   \mathrm{RMSE} &= \sqrt{\frac{1}{N}\sum_{i=1}^{N}(M_i - O_i)^2} \\[6pt]
   r             &= \frac{\displaystyle\sum_{i=1}^{N}(O_i-\bar{O})(M_i-\bar{M})}
                         {\sqrt{\displaystyle\sum_{i=1}^{N}(O_i-\bar{O})^2
                                \sum_{i=1}^{N}(M_i-\bar{M})^2}}
 \end{align}
+
+The Kling--Gupta Efficiency (KGE; \citealt{Gupta2009}) combines correlation,
+variability ratio, and bias ratio into a single score where $\mathrm{KGE}=1$
+is perfect:
+
+\begin{equation}
+  \mathrm{KGE} = 1 - \sqrt{(r-1)^2 + \!\left(\frac{\sigma_M}{\sigma_O}-1\right)^{\!2}
+                            + \!\left(\frac{\mu_M}{\mu_O}-1\right)^{\!2}}
+\end{equation}
+
+The p95 ratio measures upper-tail fidelity:
+
+\begin{equation}
+  \mathrm{p95\,ratio} = \frac{Q_{0.95}(M)}{Q_{0.95}(O)}
+\end{equation}
+
+where $Q_{0.95}$ denotes the 95th percentile across all station-day pairs.
+A value of 1 indicates the model reproduces observed extreme precipitation
+magnitudes; values below 1 indicate underestimation of heavy events.
+
+\subsubsection*{Categorical (wet/dry) metrics}
+
+Let $H$ (hits), $M$ (misses), and $F$ (false alarms) be defined relative to
+the occurrence threshold $\varepsilon$:
+
+\begin{align}
+  \mathrm{POD}        &= \frac{H}{H+M} \\[6pt]
+  \mathrm{FAR}        &= \frac{F}{H+F} \\[6pt]
+  \mathrm{Freq.\,Bias}&= \frac{H+F}{H+M}
+\end{align}
+
+POD (Probability of Detection) measures the fraction of observed wet events
+captured by the model. FAR (False Alarm Ratio) measures the fraction of model
+wet predictions that were actually dry. Frequency Bias $= 1$ indicates perfect
+wet/dry frequency; values $> 1$ indicate over-prediction of occurrence.
+
+\subsubsection*{Skill score}
 
 RMSE improvement is expressed as a percentage relative to the pre-correction RMSE:
 
