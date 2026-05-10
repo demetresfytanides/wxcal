@@ -288,7 +288,7 @@ On Motus Cloud, LLM credentials are injected automatically — no `.env` needed.
 
 Builds a spatially-varying multiplicative ratio field from station observations and applies it to every model grid point. For grid points where the model is dry but observations are wet, an additive offset is interpolated instead — distributing the observed daily total evenly across the actual window hours. Best when the obs-model signal is spatially coherent: the model and observations agree on where precipitation occurs, and the bias varies gradually across the domain.
 
-**Parameter tuning:** before applying IDW, the agent searches a 5×10 grid of power values (p ∈ {1.0, 1.5, 2.0, 2.5, 3.0}) and search radii (3, 5, 10, 20, 30, 50, 75, 100, 150, 200 km) via leave-one-out cross-validation at station locations. The 50 combinations run in parallel; the combination with the lowest LOO-RMSE is used. A high LOO-RMSE across all combinations is itself a signal that IDW cannot recover meaningful structure, in which case QM is tried instead.
+**Parameter tuning:** before applying IDW, the agent searches a 5×10 grid of power values (p ∈ {1.0, 1.5, 2.0, 2.5, 3.0}) and search radii (3, 5, 10, 20, 30, 50, 75, 100, 150, 200 km) via leave-one-out (LOO) cross-validation at station locations. LOO cross-validation works by temporarily removing one station at a time, predicting its bias ratio using IDW from all remaining stations, and measuring the prediction error — repeated for every station. The (p, radius) combination with the lowest average error across all stations is selected. The 50 combinations run in parallel; a high LOO-RMSE across all combinations is itself a signal that IDW cannot recover meaningful structure, in which case QM is tried instead.
 
 ### Quantile Mapping
 
